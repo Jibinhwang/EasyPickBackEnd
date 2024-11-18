@@ -18,9 +18,17 @@ router.get('/', async (req: Request, res: Response) => {
 // 특정 ID의 제품 조회
 router.get('/:id', async (req: Request, res: Response) => {
     const id = parseInt(req.params.id, 10);
+    if (isNaN(id)) {
+        res.status(400).json({ message: 'Invalid product ID' });
+        return;  // 요청 처리를 중단하고 에러 응답을 보냅니다.
+    }
 
     try {
         const [rows] = await pool.query<RowDataPacket[]>('SELECT * FROM Products WHERE id = ?', [id]);
+        if (rows.length === 0) {
+            res.status(404).json({ message: 'Product not found' });
+            return;  // 요청 처리를 중단하고 에러 응답을 보냅니다.
+        }
         res.json(rows[0]);
     } catch (error) {
         res.status(500).json({ message: (error as Error).message });
