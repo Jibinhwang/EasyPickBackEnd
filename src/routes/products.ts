@@ -325,7 +325,7 @@ router.get('/top-discounts', async (req: Request, res: Response) => {
             INNER JOIN review_summaries rs ON p.product_id = rs.product_id
             WHERE p.discount_rate > 0
             ORDER BY p.discount_rate DESC
-            LIMIT 10
+            LIMIT 20
         `);
         
         res.json(rows);
@@ -350,9 +350,9 @@ router.get('/top-reviewed-discounts', async (req: Request, res: Response) => {
             FROM Products p
             INNER JOIN review_summaries rs ON p.product_id = rs.product_id
             INNER JOIN Product_Review pr ON p.product_id = pr.product_id
-            WHERE p.discount_rate > 10
+            WHERE p.discount_rate > 15
             GROUP BY p.product_id
-            ORDER BY review_count DESC, p.discount_rate DESC
+            ORDER BY review_count DESC
             LIMIT 2
         `);
         
@@ -376,6 +376,33 @@ router.get('/:productId/price-history', async (req: Request, res: Response) => {
         res.json(rows);
     } catch (error) {
         console.error('Error fetching price history:', error);
+        res.status(500).json({ message: (error as Error).message });
+    }
+});
+
+// 사용자 찜한 상품 조회
+router.get('/:userId/likes', async (req: Request, res: Response) => {
+    try {
+        const { userId } = req.params;
+        console.log('userId:', userId);
+        const [rows] = await pool.query<RowDataPacket[]>(`
+            SELECT 
+                p.product_id as productID,
+                p.product_brand as manufacturer,
+                p.product_name as title,
+                p.current_price as currentPrice,
+                p.regular_price as originalPrice,
+                p.discount_rate as discountRate,
+                p.img_url as imageUrl,
+                p.product_link as productLink,
+                ul.like_price as likePrice
+            FROM User_Likes ul
+            INNER JOIN Products p ON ul.product_id = p.product_id
+            WHERE ul.user_id = ?
+        `, [userId]);
+
+        res.json(rows);
+    } catch (error) {
         res.status(500).json({ message: (error as Error).message });
     }
 });
