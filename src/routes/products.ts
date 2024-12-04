@@ -76,7 +76,13 @@ router.get('/:productId/reviews', async (req: Request, res: Response) => {
     try {
         const { productId } = req.params;
         
-        console.log('Product ID:', productId);
+        // 먼저 review_num을 가져오는 쿼리 추가
+        const [productInfo] = await pool.query<RowDataPacket[]>(
+            'SELECT review_num FROM Products WHERE product_id = ?',
+            [productId]
+        );
+        
+        const reviewNum = productInfo[0]?.review_num || 0;
         const query = `
             SELECT 
                 rc.id as category_id,
@@ -114,7 +120,11 @@ router.get('/:productId/reviews', async (req: Request, res: Response) => {
             }
         });
         
-        res.json({ pros, cons });
+        res.json({ 
+            pros, 
+            cons,
+            reviewNum
+        });
         
     } catch (error) {
         console.error('Error fetching reviews:', error);
@@ -295,6 +305,78 @@ router.get('/recommend/:keyword', async (req: Request, res: Response) => {
     } catch (error) {
         console.error('Error in recommendation:', error);
         res.status(500).json({ error: 'Failed to get recommendations' });
+    }
+});
+
+// 할인율 높은 상품 10개 조회
+router.get('/top-discounts', async (req: Request, res: Response) => {
+    try {
+        const [rows] = await pool.query<RowDataPacket[]>(`
+            SELECT DISTINCT
+                p.product_id as productID,
+                p.product_brand as manufacturer,
+                p.product_name as title,
+                p.current_price as currentPrice,
+                p.regular_price as originalPrice,
+                p.discount_rate as discountRate,
+                p.img_url as imageUrl,
+                p.product_link as productLink
+            FROM Products p
+            INNER JOIN review_summaries rs ON p.product_id = rs.product_id
+            WHERE p.discount_rate > 0
+            ORDER BY p.discount_rate DESC
+            LIMIT 10
+        `);
+        
+        res.json(rows);
+    } catch (error) {
+        res.status(500).json({ message: (error as Error).message });
+    }
+});
+
+router.get('/top-reviewed-discounts', async (req: Request, res: Response) => {
+    try {
+        const [rows] = await pool.query<RowDataPacket[]>(`
+            SELECT DISTINCT
+                p.product_id as productID,
+                p.product_brand as manufacturer,
+                p.product_name as title,
+                p.current_price as currentPrice,
+                p.regular_price as originalPrice,
+                p.discount_rate as discountRate,
+                p.img_url as imageUrl,
+                p.product_link as productLink,
+                COUNT(pr.product_review) as review_count
+            FROM Products p
+            INNER JOIN review_summaries rs ON p.product_id = rs.product_id
+            INNER JOIN Product_Review pr ON p.product_id = pr.product_id
+            WHERE p.discount_rate > 10
+            GROUP BY p.product_id
+            ORDER BY review_count DESC, p.discount_rate DESC
+            LIMIT 2
+        `);
+        
+        res.json(rows);
+    } catch (error) {
+        console.error('Error fetching top-reviewed discounts:', error);
+        res.status(500).json({ message: (error as Error).message });
+    }
+});
+
+router.get('/:productId/price-history', async (req: Request, res: Response) => {
+    try {
+        const { productId } = req.params;
+        const [rows] = await pool.query<RowDataPacket[]>(`
+            SELECT price_time, price_at
+            FROM Product_Price_Change
+            WHERE product_id = ?
+            ORDER BY price_time ASC
+        `, [productId]);
+
+        res.json(rows);
+    } catch (error) {
+        console.error('Error fetching price history:', error);
+        res.status(500).json({ message: (error as Error).message });
     }
 });
 
