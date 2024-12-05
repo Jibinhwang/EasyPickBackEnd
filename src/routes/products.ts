@@ -64,7 +64,18 @@ router.get('/todays-deal', async (req: Request, res: Response) => {
             return;
         }
         
-        res.json(rows[0]);
+        const deal = rows[0];
+        res.json({
+            productID: deal.productID,
+            manufacturer: deal.manufacturer,
+            title: deal.title,
+            currentPrice: deal.currentPrice,
+            originalPrice: deal.originalPrice,
+            discountRate: deal.discountRate,
+            imageUrl: deal.imageUrl,
+            productLink: deal.productLink,
+            scoreReview: deal.scoreReview
+        });
     } catch (error) {
         res.status(500).json({ message: (error as Error).message });
     }
@@ -384,8 +395,9 @@ async function extractKeywordsWithGPT(query: string): Promise<string[]> {
           p.regular_price,
           p.discount_rate,
           p.img_url,
+          p.product_link,
           p.score_review,
-          COUNT(pr.review_id) as review_count,
+          p.review_num,
           GROUP_CONCAT(DISTINCT pr.product_review SEPARATOR '|') as reviews,
           rs.summary_text
          FROM Products p
@@ -396,13 +408,15 @@ async function extractKeywordsWithGPT(query: string): Promise<string[]> {
          OR p.minor_category LIKE CONCAT('%', ?, '%')
          OR pr.product_review LIKE CONCAT('%', ?, '%')
          OR rs.summary_text LIKE CONCAT('%', ?, '%')
-         GROUP BY p.product_id
+         GROUP BY p.product_id, p.product_name, p.product_brand, p.current_price, 
+                  p.regular_price, p.discount_rate, p.img_url, p.product_link,
+                  p.score_review, p.review_num, rs.summary_text
          ORDER BY p.score_review DESC
          LIMIT 5`,
         [searchTerm, searchTerm, searchTerm, searchTerm, searchTerm]
       );
 
-      // 각 상품에 대한 응답 데이터 구성
+      // TodaysDeal 컴포넌트 형식에 맞게 데이터 포맷팅
       const formattedProducts = products.map((product: any) => ({
         productID: product.product_id,
         manufacturer: product.product_brand,
@@ -411,8 +425,9 @@ async function extractKeywordsWithGPT(query: string): Promise<string[]> {
         originalPrice: product.regular_price,
         discountRate: product.discount_rate,
         imageUrl: product.img_url,
+        productLink: product.product_link,
         scoreReview: product.score_review,
-        reviewCount: product.review_count,
+        reviewNum: product.review_num,
         reviews: product.reviews ? product.reviews.split('|').slice(0, 3) : [],
         summaryText: product.summary_text
       }));
