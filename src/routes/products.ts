@@ -53,7 +53,8 @@ router.get('/todays-deal', async (req: Request, res: Response) => {
                 regular_price as originalPrice,
                 discount_rate as discountRate,
                 img_url as imageUrl,
-                product_link as productLink
+                product_link as productLink,
+                score_review as scoreReview
             FROM Products 
             WHERE discount_rate > 0
             ORDER BY discount_rate DESC
@@ -303,7 +304,8 @@ router.get('/recommend/:keyword', async (req: Request, res: Response) => {
                 regular_price as originalPrice,
                 discount_rate as discountRate,
                 img_url as imageUrl,
-                product_link as productLink
+                product_link as productLink,
+                score_review as scoreReview
             FROM Products 
             WHERE product_id IN (?);
         `, [topProductIds]);
@@ -330,7 +332,8 @@ router.get('/top-discounts', async (req: Request, res: Response) => {
                 p.regular_price as originalPrice,
                 p.discount_rate as discountRate,
                 p.img_url as imageUrl,
-                p.product_link as productLink
+                p.product_link as productLink,
+                p.score_review as scoreReview
             FROM Products p
             INNER JOIN review_summaries rs ON p.product_id = rs.product_id
             WHERE p.discount_rate > 0
