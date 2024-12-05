@@ -404,15 +404,15 @@ async function extractKeywordsWithGPT(query: string): Promise<string[]> {
          LEFT JOIN Product_Review pr ON p.product_id = pr.product_id
          LEFT JOIN review_summaries rs ON p.product_id = rs.product_id
          WHERE p.product_name LIKE CONCAT('%', ?, '%')
-         OR p.major_category LIKE CONCAT('%', ?, '%')
-         OR p.minor_category LIKE CONCAT('%', ?, '%')
-         OR pr.product_review LIKE CONCAT('%', ?, '%')
-         OR rs.summary_text LIKE CONCAT('%', ?, '%')
+           OR p.major_category LIKE CONCAT('%', ?, '%')
+           OR p.minor_category LIKE CONCAT('%', ?, '%')
+           OR pr.product_review LIKE CONCAT('%', ?, '%')
+           OR rs.summary_text LIKE CONCAT('%', ?, '%')
          GROUP BY p.product_id, p.product_name, p.product_brand, p.current_price, 
                   p.regular_price, p.discount_rate, p.img_url, p.product_link,
                   p.score_review, p.review_num, rs.summary_text
-         ORDER BY p.score_review DESC
-         LIMIT 5`,
+         ORDER BY p.score_review DESC, p.review_num DESC
+         LIMIT 3`,
         [searchTerm, searchTerm, searchTerm, searchTerm, searchTerm]
       );
 
