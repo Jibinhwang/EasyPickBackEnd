@@ -209,48 +209,58 @@ router.get('/recommend/:keyword', async (req: Request, res: Response) => {
             modelName: "text-embedding-3-small"
         });
         
-        // 1. 모든 상품의 리뷰 데이터 가져오기
+        // 1. SQL 쿼리 개선 - 리뷰 데이터를 더 효과적으로 결합
         const [rows] = await pool.query<RowDataPacket[]>(`
             SELECT 
                 p.product_id,
                 p.product_name,
-                pr.product_review,
-                pr.star_score,
-                rs.is_pros,
-                rs.summary_text,
-                rc.name as category_name,
-                rc.icon_name
+                GROUP_CONCAT(DISTINCT pr.product_review SEPARATOR ' ') as combined_reviews,
+                AVG(pr.star_score) as avg_star_score,
+                GROUP_CONCAT(DISTINCT 
+                    CASE WHEN rs.is_pros = 1 
+                    THEN rs.summary_text 
+                    END SEPARATOR ' ') as pros_summary,
+                GROUP_CONCAT(DISTINCT 
+                    CASE WHEN rs.is_pros = 0 
+                    THEN rs.summary_text 
+                    END SEPARATOR ' ') as cons_summary
             FROM Products p
             INNER JOIN Product_Review pr ON p.product_id = pr.product_id
-            INNER JOIN review_summaries rs ON p.product_id = rs.product_id
-            INNER JOIN review_categories rc ON rs.category_id = rc.id
+            LEFT JOIN review_summaries rs ON p.product_id = rs.product_id
             WHERE p.discount_rate > 10
+            GROUP BY p.product_id
+            HAVING AVG(pr.star_score) >= 4  -- 평점 4점 이상인 상품만 추천
         `);
-        console.log('📝 조회된 상품 수:', rows.length);
 
-        // 2. 리뷰 문서 생성 및 임베딩
+        // 2. 문서 생성 시 더 많은 컨텍스트 포함
         const documents = rows.map(row => new Document({
-            pageContent: row.product_review,
+            pageContent: `
+                상품명: ${row.product_name}
+                리뷰: ${row.combined_reviews}
+                장점: ${row.pros_summary || ''}
+                단점: ${row.cons_summary || ''}
+            `,
             metadata: {
                 productId: row.product_id,
                 productName: row.product_name,
-                starScore: row.star_score
+                starScore: row.avg_star_score
             }
         }));
 
-        // 3. 키워드와 리뷰 임베딩 생성
+        // 3. 임베딩 및 유사도 계산 로직은 유지
         const keywordEmbedding = await embeddings.embedQuery(keyword);
         const documentEmbeddings = await embeddings.embedDocuments(
             documents.map(doc => doc.pageContent)
         );
 
-        // 4. 유사도 계산 및 가중치 적용
+        // 4. 가중치 계산 개선
         const productScores = new Map<number, { score: number, count: number, productName: string }>();
 
         documentEmbeddings.forEach((embedding, index) => {
             const doc = documents[index];
             const similarityScore = similarity.cosine(keywordEmbedding, embedding);
-            const weightedScore = similarityScore * doc.metadata.starScore;
+            // 별점 가중치를 더 강화
+            const weightedScore = similarityScore * Math.pow(doc.metadata.starScore, 2);
 
             if (!productScores.has(doc.metadata.productId)) {
                 productScores.set(doc.metadata.productId, {
@@ -263,7 +273,7 @@ router.get('/recommend/:keyword', async (req: Request, res: Response) => {
             const product = productScores.get(doc.metadata.productId);
             if (product) {
                 product.score += weightedScore;
-                product.count += doc.metadata.starScore;
+                product.count += 1;
             }
         });
 
@@ -402,6 +412,39 @@ router.get('/:userId/likes', async (req: Request, res: Response) => {
         `, [userId]);
 
         res.json(rows);
+    } catch (error) {
+        res.status(500).json({ message: (error as Error).message });
+    }
+});
+
+// 찜하기 추가
+router.post('/:userId/likes/:productId', async (req: Request, res: Response) => {
+    try {
+        const { userId, productId } = req.params;
+        const { currentPrice } = req.body;
+        
+        await pool.query(
+            'INSERT INTO User_Likes (user_id, product_id, like_price) VALUES (?, ?, ?)',
+            [userId, productId, currentPrice]
+        );
+        
+        res.json({ message: 'Product liked successfully' });
+    } catch (error) {
+        res.status(500).json({ message: (error as Error).message });
+    }
+});
+
+// 찜하기 삭제
+router.delete('/:userId/likes/:productId', async (req: Request, res: Response) => {
+    try {
+        const { userId, productId } = req.params;
+        
+        await pool.query(
+            'DELETE FROM User_Likes WHERE user_id = ? AND product_id = ?',
+            [userId, productId]
+        );
+        
+        res.json({ message: 'Product unliked successfully' });
     } catch (error) {
         res.status(500).json({ message: (error as Error).message });
     }
