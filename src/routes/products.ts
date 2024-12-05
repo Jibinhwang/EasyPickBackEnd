@@ -340,109 +340,239 @@ router.get('/recommend/:keyword', async (req: Request, res: Response) => {
 });
 
 // 자연어 쿼리를 처리하는 새로운 엔드포인트
+interface ProductWithReviews extends RowDataPacket {
+  product_id: number;
+  product_name: string;
+  product_brand: string;
+  current_price: number;
+  regular_price: number;
+  discount_rate: number;
+  img_url: string;
+  product_link: string;
+  score_review: number;
+  review_num: number;
+  major_category: string;
+  minor_category: string;
+  reviews: string;
+  avg_star_score: number;
+  pros_summary: string;
+  cons_summary: string;
+}
+
+interface ProductWithSimilarity extends ProductWithReviews {
+  similarity: number;
+}
+
 async function extractKeywordsWithGPT(query: string): Promise<string[]> {
-    try {
-      const response = await openai.chat.completions.create({
-        model: "gpt-4o-mini",
-        messages: [
-            { role: "system", content: `당신은 음식 검색 키워드 추출 전문가입니다.
-  사용자의 자연어 쿼리에서 음식과 관련된 주요 키워드를 추출해주세요.
-  다음과 같은 카테고리의 키워드를 중심으로 추출해주세요:
-  - 맛 (매콤한, 달달한, 고소한, 담백한 등)
-  - 상황 (가성비, 고급, 건강한, 다이어트 등)
-  - 재료 (소고기, 해산물, 채소 등)
-  - 종류 (한식, 중식, 일식, 양식 등)
-  
-  키워드만 쉼표로 구분하여 출력하세요. 예시:
-  입력: "매운 음식 중에서 가성비 좋은거 추천해줘"
-  출력: 매콤한, 가성비` },
-            { role: "user", content: query }
-        ],
-        temperature: 0.3,
-        max_tokens: 50
-      });
-  
-      const keywords = response.choices[0].message.content?.split(',')
-        .map(keyword => keyword.trim())
-        .filter(keyword => keyword.length > 0) || [];
+  try {
+    const response = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [
+        { 
+          role: "system", 
+          content: `당신은 음식 검색 키워드 추출 전문가입니다.
+사용자의 자연어 쿼리에서 음식과 관련된 주요 키워드를 추출해주세요.
+다음과 같은 카테고리의 키워드를 중심으로 추출해주세요:
+- 맛 (매콤한, 달달한, 고소한, 담백한 등)
+- 상황 (가성비, 고급, 건강한, 다이어트 등)
+- 재료 (소고기, 해산물, 채소 등)
+- 종류 (한식, 중식, 일식, 양식 등)
+
+키워드만 쉼표로 구분하여 출력하세요. 예시:
+입력: "매운 음식 중에서 가성비 좋은거 추천해줘"
+출력: 매콤한, 가성비` 
+        },
+        { role: "user", content: query }
+      ],
+      temperature: 0.3,
+      max_tokens: 50
+    });
+
+    const keywords = response.choices[0].message.content?.split(',')
+      .map(keyword => keyword.trim())
+      .filter(keyword => keyword.length > 0) || [];
+    
+    return keywords;
+  } catch (error: any) {
+    console.error('Error extracting keywords with GPT:', error);
+    
+    // Rate limit 에러 처리
+    if (error?.message?.includes('rate limit') || error?.error?.type === 'resource_exhausted') {
+      // 쿼리에서 직접 키워드 추출 시도
+      const simpleKeywords = query.split(' ')
+        .filter(word => word.length >= 2)  // 2글자 이상만 키워드로 사용
+        .map(word => word.replace(/[,.!?]/g, '').trim())  // 특수문자 제거
+        .filter(word => word.length > 0);
       
-      return keywords;
-    } catch (error) {
-      console.error('Error extracting keywords with GPT:', error);
-      // GPT 에러 시 기본 '가성비' 키워드 반환
-      return ['가성비'];
+      if (simpleKeywords.length > 0) {
+        return simpleKeywords;
+      }
     }
+    
+    // 기본 '가성비' 키워드 반환
+    return ['가성비'];
   }
-  
-  router.post('/natural-query', async (req: Request, res: Response) => {
+}
+
+router.post('/natural-query', async (req: Request, res: Response) => {
     try {
       const { query } = req.body;
       
       // GPT로 키워드 추출
       const keywords = await extractKeywordsWithGPT(query);
       console.log('Extracted keywords:', keywords);
-  
-      // 키워드들을 하나의 검색어로 합치기
-      const searchTerm = keywords.join(' ');
-      
-      // 상품 검색 쿼리 수정
-      const [products] = await pool.query<RowDataPacket[]>(
-        `SELECT DISTINCT
-          p.product_id,
-          p.product_name,
-          p.product_brand,
-          p.current_price,
-          p.regular_price,
-          p.discount_rate,
-          p.img_url,
-          p.product_link,
-          p.score_review,
-          p.review_num,
-          GROUP_CONCAT(DISTINCT pr.product_review SEPARATOR '|') as reviews,
-          rs.summary_text
-         FROM Products p
-         LEFT JOIN Product_Review pr ON p.product_id = pr.product_id
-         LEFT JOIN review_summaries rs ON p.product_id = rs.product_id
-         WHERE p.product_name LIKE CONCAT('%', ?, '%')
-           OR p.major_category LIKE CONCAT('%', ?, '%')
-           OR p.minor_category LIKE CONCAT('%', ?, '%')
-           OR pr.product_review LIKE CONCAT('%', ?, '%')
-           OR rs.summary_text LIKE CONCAT('%', ?, '%')
-         GROUP BY p.product_id, p.product_name, p.product_brand, p.current_price, 
-                  p.regular_price, p.discount_rate, p.img_url, p.product_link,
-                  p.score_review, p.review_num, rs.summary_text
-         ORDER BY p.score_review DESC, p.review_num DESC
-         LIMIT 3`,
-        [searchTerm, searchTerm, searchTerm, searchTerm, searchTerm]
-      );
 
-      // TodaysDeal 컴포넌트 형식에 맞게 데이터 포맷팅
-      const formattedProducts = products.map((product: any) => ({
-        productID: product.product_id,
-        manufacturer: product.product_brand,
-        title: product.product_name,
-        currentPrice: product.current_price,
-        originalPrice: product.regular_price,
-        discountRate: product.discount_rate,
-        imageUrl: product.img_url,
-        productLink: product.product_link,
-        scoreReview: product.score_review,
-        reviewNum: product.review_num,
-        reviews: product.reviews ? product.reviews.split('|').slice(0, 3) : [],
-        summaryText: product.summary_text
-      }));
+      try {
+        // 1. 먼저 상품 데이터 가져오기
+        const [products] = await pool.query<ProductWithReviews[]>(
+          `SELECT 
+            p.product_id,
+            p.product_name,
+            p.product_brand,
+            p.current_price,
+            p.regular_price,
+            p.discount_rate,
+            p.img_url,
+            p.product_link,
+            p.score_review,
+            p.review_num,
+            p.major_category,
+            p.minor_category,
+            GROUP_CONCAT(DISTINCT pr.product_review SEPARATOR ' ') as reviews,
+            AVG(pr.star_score) as avg_star_score,
+            GROUP_CONCAT(DISTINCT 
+              CASE WHEN rs.is_pros = 1 
+              THEN rs.summary_text 
+              END SEPARATOR ' ') as pros_summary,
+            GROUP_CONCAT(DISTINCT 
+              CASE WHEN rs.is_pros = 0 
+              THEN rs.summary_text 
+              END SEPARATOR ' ') as cons_summary
+           FROM Products p
+           LEFT JOIN Product_Review pr ON p.product_id = pr.product_id
+           LEFT JOIN review_summaries rs ON p.product_id = rs.product_id
+           WHERE p.discount_rate >= 10
+           GROUP BY p.product_id
+           HAVING AVG(COALESCE(pr.star_score, 0)) >= 4
+           LIMIT 30`
+        );
 
-      res.json({
-        success: true,
-        query,
-        products: formattedProducts
-      });
+        // 2. OpenAI 임베딩 설정
+        const embeddings = new OpenAIEmbeddings({
+          openAIApiKey: process.env.OPENAI_API_KEY,
+          modelName: "text-embedding-3-small"
+        });
+
+        // 3. 쿼리 임베딩 생성
+        const queryEmbedding = await embeddings.embedQuery(query);
+
+        // 4. 각 상품에 대한 설명 텍스트 생성 및 임베딩
+        const productTexts = products.map(product => 
+          `상품명: ${product.product_name}
+           브랜드: ${product.product_brand}
+           카테고리: ${product.major_category} ${product.minor_category}
+           리뷰: ${product.reviews || ''}
+           장점: ${product.pros_summary || ''}
+           단점: ${product.cons_summary || ''}`
+        );
+
+        const productEmbeddings = await embeddings.embedDocuments(productTexts);
+
+        // 5. 코사인 유사도 계산 및 정렬
+        const productsWithScores: ProductWithSimilarity[] = products.map((product, index) => ({
+          ...product,
+          similarity: similarity.cosine(queryEmbedding, productEmbeddings[index])
+        }));
+
+        const rankedProducts = productsWithScores
+          .sort((a, b) => {
+            // 유사도와 평점을 결합한 최종 점수 계산
+            const scoreA = (a.similarity * 0.7) + (a.avg_star_score / 5 * 0.3);
+            const scoreB = (b.similarity * 0.7) + (b.avg_star_score / 5 * 0.3);
+            return scoreB - scoreA;
+          })
+          .slice(0, 3);
+
+        // 6. TodaysDeal 컴포넌트 형식에 맞게 데이터 포맷팅
+        const formattedProducts = rankedProducts.map(product => ({
+          productID: product.product_id,
+          manufacturer: product.product_brand,
+          title: product.product_name,
+          currentPrice: product.current_price,
+          originalPrice: product.regular_price,
+          discountRate: product.discount_rate,
+          imageUrl: product.img_url,
+          productLink: product.product_link,
+          scoreReview: product.score_review,
+          reviewNum: product.review_num,
+          reviews: product.reviews ? product.reviews.split('|').slice(0, 3) : [],
+          summaryText: product.pros_summary
+        }));
+
+        res.json({
+          success: true,
+          query,
+          products: formattedProducts
+        });
+
+      } catch (embeddingError) {
+        console.error('Embedding error:', embeddingError);
+        // 임베딩 에러 시 기본 키워드 검색으로 폴백
+        const [fallbackProducts] = await pool.query<RowDataPacket[]>(
+          `SELECT DISTINCT
+            p.product_id,
+            p.product_name,
+            p.product_brand,
+            p.current_price,
+            p.regular_price,
+            p.discount_rate,
+            p.img_url,
+            p.product_link,
+            p.score_review,
+            p.review_num,
+            GROUP_CONCAT(DISTINCT pr.product_review SEPARATOR '|') as reviews,
+            rs.summary_text
+           FROM Products p
+           LEFT JOIN Product_Review pr ON p.product_id = pr.product_id
+           LEFT JOIN review_summaries rs ON p.product_id = rs.product_id
+           WHERE (
+             p.product_name LIKE CONCAT('%', ?, '%')
+             OR p.major_category LIKE CONCAT('%', ?, '%')
+             OR p.minor_category LIKE CONCAT('%', ?, '%')
+           )
+           GROUP BY p.product_id
+           ORDER BY p.score_review DESC, p.review_num DESC
+           LIMIT 3`,
+          [keywords.join(' '), keywords.join(' '), keywords.join(' ')]
+        );
+
+        const formattedProducts = fallbackProducts.map(product => ({
+          productID: product.product_id,
+          manufacturer: product.product_brand,
+          title: product.product_name,
+          currentPrice: product.current_price,
+          originalPrice: product.regular_price,
+          discountRate: product.discount_rate,
+          imageUrl: product.img_url,
+          productLink: product.product_link,
+          scoreReview: product.score_review,
+          reviewNum: product.review_num,
+          reviews: product.reviews ? product.reviews.split('|').slice(0, 3) : [],
+          summaryText: product.summary_text
+        }));
+
+        res.json({
+          success: true,
+          query,
+          products: formattedProducts
+        });
+      }
       
     } catch (error) {
       console.error('Error in natural query:', error);
       res.status(500).json({ success: false, error: 'Internal server error' });
     }
-  });
+});
 
 // 할인율 높은 상품 10개 조회
   router.get('/top-discounts', async (req: Request, res: Response) => {
