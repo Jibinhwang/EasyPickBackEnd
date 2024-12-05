@@ -2,20 +2,18 @@
 import express, { Request, Response } from 'express';
 import pool from '../db';
 import { RowDataPacket } from 'mysql2/promise';
-import { OpenAI } from '@langchain/openai';
+import OpenAI from 'openai';
 import { OpenAIEmbeddings } from '@langchain/openai';
 import { Document } from '@langchain/core/documents';
 import { similarity } from 'ml-distance';
 import dotenv from 'dotenv';
-
 dotenv.config();
 
-const router = express.Router();
 const openai = new OpenAI({
-    openAIApiKey: process.env.OPENAI_API_KEY,
-    modelName: "gpt-4o-mini",
-    temperature: 0.7
+  apiKey: process.env.OPENAI_API_KEY
 });
+
+const router = express.Router();
 
 // 모의 데이터
 const mockRecommendation = {
@@ -180,7 +178,17 @@ router.get('/:productId/recommendation', async (req: Request, res: Response) => 
                 
                 이 정보들을 바탕으로 구매를 고민하는 사람들에게 추천 멘트를 작성해주세요.`;
 
-            const recommendation = await openai.invoke(systemPrompt + "\n\n" + userPrompt);
+            const response = await openai.chat.completions.create({
+                model: "gpt-4o-mini",
+                messages: [
+                    { role: "system", content: systemPrompt },
+                    { role: "user", content: userPrompt }
+                ],
+                temperature: 0.7,
+                max_tokens: 200
+            });
+
+            const recommendation = response.choices[0].message.content;
 
             res.json({
                 recommendation,
@@ -320,8 +328,109 @@ router.get('/recommend/:keyword', async (req: Request, res: Response) => {
     }
 });
 
+// 자연어 쿼리를 처리하는 새로운 엔드포인트
+async function extractKeywordsWithGPT(query: string): Promise<string[]> {
+    try {
+      const response = await openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        messages: [
+            { role: "system", content: `당신은 음식 검색 키워드 추출 전문가입니다.
+  사용자의 자연어 쿼리에서 음식과 관련된 주요 키워드를 추출해주세요.
+  다음과 같은 카테고리의 키워드를 중심으로 추출해주세요:
+  - 맛 (매콤한, 달달한, 고소한, 담백한 등)
+  - 상황 (가성비, 고급, 건강한, 다이어트 등)
+  - 재료 (소고기, 해산물, 채소 등)
+  - 종류 (한식, 중식, 일식, 양식 등)
+  
+  키워드만 쉼표로 구분하여 출력하세요. 예시:
+  입력: "매운 음식 중에서 가성비 좋은거 추천해줘"
+  출력: 매콤한, 가성비` },
+            { role: "user", content: query }
+        ],
+        temperature: 0.3,
+        max_tokens: 50
+      });
+  
+      const keywords = response.choices[0].message.content?.split(',')
+        .map(keyword => keyword.trim())
+        .filter(keyword => keyword.length > 0) || [];
+      
+      return keywords;
+    } catch (error) {
+      console.error('Error extracting keywords with GPT:', error);
+      // GPT 에러 시 기본 '가성비' 키워드 반환
+      return ['가성비'];
+    }
+  }
+  
+  router.post('/natural-query', async (req: Request, res: Response) => {
+    try {
+      const { query } = req.body;
+      
+      // GPT로 키워드 추출
+      const keywords = await extractKeywordsWithGPT(query);
+      console.log('Extracted keywords:', keywords);
+  
+      // 키워드들을 하나의 검색어로 합치기
+      const searchTerm = keywords.join(' ');
+      
+      // 상품 검색 쿼리 수정
+      const [products] = await pool.query<RowDataPacket[]>(
+        `SELECT DISTINCT
+          p.product_id,
+          p.product_name,
+          p.product_brand,
+          p.current_price,
+          p.regular_price,
+          p.discount_rate,
+          p.img_url,
+          p.score_review,
+          COUNT(pr.review_id) as review_count,
+          GROUP_CONCAT(DISTINCT pr.product_review SEPARATOR '|') as reviews,
+          rs.summary_text
+         FROM Products p
+         LEFT JOIN Product_Review pr ON p.product_id = pr.product_id
+         LEFT JOIN review_summaries rs ON p.product_id = rs.product_id
+         WHERE p.product_name LIKE CONCAT('%', ?, '%')
+         OR p.major_category LIKE CONCAT('%', ?, '%')
+         OR p.minor_category LIKE CONCAT('%', ?, '%')
+         OR pr.product_review LIKE CONCAT('%', ?, '%')
+         OR rs.summary_text LIKE CONCAT('%', ?, '%')
+         GROUP BY p.product_id
+         ORDER BY p.score_review DESC
+         LIMIT 5`,
+        [searchTerm, searchTerm, searchTerm, searchTerm, searchTerm]
+      );
+
+      // 각 상품에 대한 응답 데이터 구성
+      const formattedProducts = products.map((product: any) => ({
+        productID: product.product_id,
+        manufacturer: product.product_brand,
+        title: product.product_name,
+        currentPrice: product.current_price,
+        originalPrice: product.regular_price,
+        discountRate: product.discount_rate,
+        imageUrl: product.img_url,
+        scoreReview: product.score_review,
+        reviewCount: product.review_count,
+        reviews: product.reviews ? product.reviews.split('|').slice(0, 3) : [],
+        summaryText: product.summary_text
+      }));
+
+      res.json({
+        success: true,
+        query,
+        products: formattedProducts
+      });
+      
+    } catch (error) {
+      console.error('Error in natural query:', error);
+      res.status(500).json({ success: false, error: 'Internal server error' });
+    }
+  });
+
 // 할인율 높은 상품 10개 조회
-router.get('/top-discounts', async (req: Request, res: Response) => {
+  router.get('/top-discounts', async (req: Request, res: Response) => {
     try {
         const [rows] = await pool.query<RowDataPacket[]>(`
             SELECT DISTINCT
