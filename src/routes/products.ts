@@ -684,7 +684,7 @@ router.delete('/:userId/likes/:productId', async (req: Request, res: Response) =
 // 특정 카테고리 조회
 router.get('/search', async (req: Request, res: Response) => {
     try {
-        const { category, brand, minPrice, maxPrice, orderBy } = req.query;
+        const { category, brand, minPrice, maxPrice, orderBy = 'score' } = req.query;
         let query = `SELECT * FROM Products WHERE 1=1`;
         const params: any[] = [];
         if (category) {
@@ -703,13 +703,19 @@ router.get('/search', async (req: Request, res: Response) => {
             query += ' AND regular_price <= ?';
             params.push(Number(maxPrice));
         }
-        if (orderBy == 'review') {
-            query += ' ORDER BY review_num';
-        } else if (orderBy == 'score') {
-            query += ' ORDER BY score_review DESC';
-        } else if (orderBy == 'price') {
-            query += ' ORDER BY current_price ASC';
+        query += ' ORDER BY ';
+        switch(orderBy) {
+            case 'review':
+                query += 'review_num DESC';
+                break;
+            case 'price':
+                query += 'current_price ASC';
+                break;
+            case 'score':
+            default:
+                query += 'score_review DESC';
         }
+
         const [products] = await pool.query<RowDataPacket[]>(query, params);
         res.json(products);
     } catch (error) {
