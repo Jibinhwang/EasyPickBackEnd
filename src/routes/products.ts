@@ -681,4 +681,40 @@ router.delete('/:userId/likes/:productId', async (req: Request, res: Response) =
     }
 });
 
+// 특정 카테고리 조회
+router.get('/search', async (req: Request, res: Response) => {
+    try {
+        const { category, brand, minPrice, maxPrice, orderBy } = req.query;
+        let query = `SELECT * FROM Products WHERE 1=1`;
+        const params: any[] = [];
+        if (category) {
+            query += ' AND major_category = ?';
+            params.push(category);
+        }
+        if (brand) {
+            query += ' AND product_brand = ?';
+            params.push(brand);
+        }
+        if (minPrice) {
+            query += ' AND regular_price >= ?';
+            params.push(Number(minPrice));
+        }
+        if (maxPrice) {
+            query += ' AND regular_price <= ?';
+            params.push(Number(maxPrice));
+        }
+        if (orderBy == 'review') {
+            query += ' ORDER BY review_num';
+        } else if (orderBy == 'score') {
+            query += ' ORDER BY score_review DESC';
+        } else if (orderBy == 'price') {
+            query += ' ORDER BY current_price ASC';
+        }
+        const [products] = await pool.query<RowDataPacket[]>(query, params);
+        res.json(products);
+    } catch (error) {
+        res.status(500).json({ message: (error as Error).message });
+    }
+});
+
 export default router;
