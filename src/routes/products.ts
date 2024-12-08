@@ -7,6 +7,12 @@ import { OpenAIEmbeddings } from '@langchain/openai';
 import { Document } from '@langchain/core/documents';
 import { similarity } from 'ml-distance';
 import dotenv from 'dotenv';
+import { ChatOpenAI } from "@langchain/openai";
+import { PromptTemplate } from "@langchain/core/prompts";
+import { RunnableSequence } from "@langchain/core/runnables";
+import { StringOutputParser } from "@langchain/core/output_parsers";
+import { VectorStore } from "@langchain/core/vectorstores";
+import { MemoryVectorStore } from "langchain/vectorstores/memory";
 dotenv.config();
 
 const openai = new OpenAI({
@@ -340,54 +346,78 @@ router.get('/recommend/:keyword', async (req: Request, res: Response) => {
 });
 
 // 자연어 쿼리를 처리하는 새로운 엔드포인트
-async function extractKeywordsWithGPT(query: string): Promise<string[]> {
-    try {
-      const response = await openai.chat.completions.create({
-        model: "gpt-4o-mini",
-        messages: [
-            { role: "system", content: `당신은 음식 검색 키워드 추출 전문가입니다.
-  사용자의 자연어 쿼리에서 음식과 관련된 주요 키워드를 추출해주세요.
-  다음과 같은 카테고리의 키워드를 중심으로 추출해주세요:
-  - 맛 (매콤한, 달달한, 고소한, 담백한 등)
-  - 상황 (가성비, 고급, 건강한, 다이어트 등)
-  - 재료 (소고기, 해산물, 채소 등)
-  - 종류 (한식, 중식, 일식, 양식 등)
-  
-  키워드만 쉼표로 구분하여 출력하세요. 예시:
-  입력: "매운 음식 중에서 가성비 좋은거 추천해줘"
-  출력: 매콤한, 가성비` },
-            { role: "user", content: query }
-        ],
-        temperature: 0.3,
-        max_tokens: 50
-      });
-  
-      const keywords = response.choices[0].message.content?.split(',')
-        .map(keyword => keyword.trim())
-        .filter(keyword => keyword.length > 0) || [];
-      
-      return keywords;
-    } catch (error) {
-      console.error('Error extracting keywords with GPT:', error);
-      // GPT 에러 시 기본 '가성비' 키워드 반환
-      return ['가성비'];
-    }
-  }
-  
-  router.post('/natural-query', async (req: Request, res: Response) => {
+interface ProductWithReviews extends RowDataPacket {
+  product_id: number;
+  product_name: string;
+  product_brand: string;
+  current_price: number;
+  regular_price: number;
+  discount_rate: number;
+  img_url: string;
+  product_link: string;
+  score_review: number;
+  review_num: number;
+  major_category: string;
+  minor_category: string;
+  reviews: string;
+  avg_star_score: number;
+  pros_summary: string;
+  cons_summary: string;
+}
+
+interface ProductDocument extends Document {
+  metadata: {
+    productId: number;
+    brand: string;
+    category: string;
+    price: number;
+    discountRate: number;
+    rating: number;
+  };
+}
+
+async function createVectorStore(products: ProductWithReviews[]): Promise<VectorStore> {
+  const embeddings = new OpenAIEmbeddings({
+    openAIApiKey: process.env.OPENAI_API_KEY,
+    modelName: "text-embedding-3-small"
+  });
+
+  const documents: ProductDocument[] = products.map(product => {
+    const content = `
+      상품명: ${product.product_name}
+      브랜드: ${product.product_brand}
+      카테고리: ${product.major_category} ${product.minor_category}
+      가격: ${product.current_price}원 (할인율: ${product.discount_rate}%)
+      평점: ${product.avg_star_score}
+      장점: ${product.pros_summary || ''}
+      단점: ${product.cons_summary || ''}
+      리뷰: ${product.reviews || ''}
+    `.trim();
+
+    return new Document({
+      pageContent: content,
+      metadata: {
+        productId: product.product_id,
+        brand: product.product_brand,
+        category: `${product.major_category} ${product.minor_category}`,
+        price: product.current_price,
+        discountRate: product.discount_rate,
+        rating: product.avg_star_score
+      }
+    });
+  });
+
+  return await MemoryVectorStore.fromDocuments(documents, embeddings);
+}
+
+router.post('/natural-query', async (req: Request, res: Response) => {
     try {
       const { query } = req.body;
-      
-      // GPT로 키워드 추출
-      const keywords = await extractKeywordsWithGPT(query);
-      console.log('Extracted keywords:', keywords);
-  
-      // 키워드들을 하나의 검색어로 합치기
-      const searchTerm = keywords.join(' ');
-      
-      // 상품 검색 쿼리 수정
-      const [products] = await pool.query<RowDataPacket[]>(
-        `SELECT DISTINCT
+      console.log('\n🔍 사용자 질문:', query);
+
+      // 1. 상품 데이터 조회
+      const [products] = await pool.query<ProductWithReviews[]>(
+        `SELECT 
           p.product_id,
           p.product_name,
           p.product_brand,
@@ -398,51 +428,125 @@ async function extractKeywordsWithGPT(query: string): Promise<string[]> {
           p.product_link,
           p.score_review,
           p.review_num,
-          GROUP_CONCAT(DISTINCT pr.product_review SEPARATOR '|') as reviews,
-          rs.summary_text
+          p.major_category,
+          p.minor_category,
+          GROUP_CONCAT(DISTINCT pr.product_review SEPARATOR ' ') as reviews,
+          AVG(pr.star_score) as avg_star_score,
+          GROUP_CONCAT(DISTINCT 
+            CASE WHEN rs.is_pros = 1 
+            THEN rs.summary_text 
+            END SEPARATOR ' ') as pros_summary,
+          GROUP_CONCAT(DISTINCT 
+            CASE WHEN rs.is_pros = 0 
+            THEN rs.summary_text 
+            END SEPARATOR ' ') as cons_summary
          FROM Products p
          LEFT JOIN Product_Review pr ON p.product_id = pr.product_id
          LEFT JOIN review_summaries rs ON p.product_id = rs.product_id
-         WHERE p.product_name LIKE CONCAT('%', ?, '%')
-           OR p.major_category LIKE CONCAT('%', ?, '%')
-           OR p.minor_category LIKE CONCAT('%', ?, '%')
-           OR pr.product_review LIKE CONCAT('%', ?, '%')
-           OR rs.summary_text LIKE CONCAT('%', ?, '%')
-         GROUP BY p.product_id, p.product_name, p.product_brand, p.current_price, 
-                  p.regular_price, p.discount_rate, p.img_url, p.product_link,
-                  p.score_review, p.review_num, rs.summary_text
-         ORDER BY p.score_review DESC, p.review_num DESC
-         LIMIT 3`,
-        [searchTerm, searchTerm, searchTerm, searchTerm, searchTerm]
+         WHERE p.discount_rate >= 10
+         GROUP BY p.product_id
+         HAVING AVG(COALESCE(pr.star_score, 0)) >= 4
+         LIMIT 100`
       );
+      console.log('📦 조회된 상품 수:', products.length);
+      
+      // 2. Vector Store 생성
+      const vectorStore = await createVectorStore(products);
+      console.log('🎯 Vector Store 생성 완료');
 
-      // TodaysDeal 컴포넌트 형식에 맞게 데이터 포맷팅
-      const formattedProducts = products.map((product: any) => ({
-        productID: product.product_id,
-        manufacturer: product.product_brand,
-        title: product.product_name,
-        currentPrice: product.current_price,
-        originalPrice: product.regular_price,
-        discountRate: product.discount_rate,
-        imageUrl: product.img_url,
-        productLink: product.product_link,
-        scoreReview: product.score_review,
-        reviewNum: product.review_num,
-        reviews: product.reviews ? product.reviews.split('|').slice(0, 3) : [],
-        summaryText: product.summary_text
-      }));
+      // 3. RAG 체인 구성
+      const retriever = vectorStore.asRetriever({
+        k: 3, // 상위 3개 상품 검색
+      });
+
+      const contextPrompt = PromptTemplate.fromTemplate(`
+        사용자 질문: {question}
+
+        다음은 관련된 상품들의 정보입니다:
+        {context}
+
+        위 정보를 바탕으로 사용자의 질문에 대한 추천 답변을 작성해주세요.
+        
+        답변 형식:
+        - 가격, 할인율, 평점 등 구체적인 수치 정보를 포함해주세요
+        - 실제 리뷰나 장점을 인용하여 설득력을 높여주세요
+        - 2-3개의 상품을 비교하여 추천해주세요
+        - 친근하고 자연스러운 톤으로 작성해주세요
+        - 이모티콘 적절히 사용해주세요
+
+        필수 지침:
+        1. 강조가 필요할 때는 반드시 <b></b> 태그만 사용할 것
+        2. 가격은 "<b>8,900원</b>" 형식으로 표시
+        3. 할인율은 "<b>40% 할인</b>" 형식으로 표시
+        4. 평점은 "<b>평점 4.5점</b>" 형식으로 표시
+        5. 상품명은 "<b>상품명</b>" 형식으로 표시
+        6. 인용은 "<quote></quote>" 형식으로 표시
+        7. 너의 답변에 **가 있으면 다 지워줘
+      `);
+
+      const llm = new ChatOpenAI({
+        modelName: "gpt-4o-mini",
+        temperature: 0.7,
+      });
+
+      const chain = RunnableSequence.from([
+        {
+          context: async (input: { question: string }) => {
+            const docs = await retriever.getRelevantDocuments(input.question);
+            return docs.map(doc => doc.pageContent).join('\n\n');
+          },
+          question: (input: { question: string }) => input.question,
+        },
+        contextPrompt,
+        llm,
+        new StringOutputParser(),
+      ]);
+
+      // 4. RAG 체인 실행
+      console.log('\n⚡ RAG 체인 실행 중...');
+      const answer = await chain.invoke({
+        question: query,
+      });
+      console.log('\n💬 생성된 답변:', answer);
+
+      // 5. 최종 추천 상품
+      const retrievedDocs = await vectorStore.similaritySearch(query, 3);
+      const recommendedProducts = await Promise.all(
+        retrievedDocs.map(async (doc) => {
+          const product = products.find(p => p.product_id === doc.metadata.productId);
+          return {
+            productID: product?.product_id,
+            manufacturer: product?.product_brand,
+            title: product?.product_name,
+            currentPrice: product?.current_price,
+            originalPrice: product?.regular_price,
+            discountRate: product?.discount_rate,
+            imageUrl: product?.img_url,
+            productLink: product?.product_link,
+            scoreReview: product?.score_review,
+            reviewNum: product?.review_num,
+            similarity: doc.metadata.score
+          };
+        })
+      );
+      console.log('\n✨ 최종 추천 상품:', recommendedProducts.map(p => ({
+        id: p.productID,
+        name: p.title,
+        price: p.currentPrice,
+        discount: p.discountRate + '%'
+      })));
 
       res.json({
         success: true,
-        query,
-        products: formattedProducts
+        answer,
+        products: recommendedProducts
       });
-      
+
     } catch (error) {
       console.error('Error in natural query:', error);
       res.status(500).json({ success: false, error: 'Internal server error' });
     }
-  });
+});
 
 // 할인율 높은 상품 10개 조회
   router.get('/top-discounts', async (req: Request, res: Response) => {
